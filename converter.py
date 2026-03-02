@@ -1,5 +1,6 @@
 """
-Markdown Converter — Bulk convert Word, Excel, PDF, EPUB, and URLs to Markdown.
+Markdown Converter — Bulk convert Word, Excel, PDF, EPUB, and URLs
+to GitHub Flavored Markdown (GFM) for NotebookLM.
 """
 
 import os
@@ -14,14 +15,34 @@ from urllib.parse import urlparse
 import windnd
 
 
+# ─── GFM markdownify options ────────────────────────────────────────────────
+
+GFM_OPTIONS = dict(
+    heading_style="ATX",
+    escape_misc=True,
+    newline_style="backslash",
+    table_infer_header=True,
+)
+
+
+def _to_gfm(html):
+    """Convert HTML to GitHub Flavored Markdown."""
+    from markdownify import markdownify
+    return markdownify(html, **GFM_OPTIONS)
+
+
+def _escape_pipe(text):
+    """Escape pipe characters inside table cell text."""
+    return text.replace("|", "\\|")
+
+
 # ─── Conversion Functions ───────────────────────────────────────────────────
 
 def convert_docx(filepath):
     import mammoth
     with open(filepath, "rb") as f:
         result = mammoth.convert_to_html(f)
-    from markdownify import markdownify
-    return markdownify(result.value, heading_style="ATX")
+    return _to_gfm(result.value)
 
 
 def convert_xlsx(filepath):
@@ -34,13 +55,11 @@ def convert_xlsx(filepath):
         if not rows:
             continue
         parts.append(f"## {sheet_name}\n")
-        # Build markdown table
-        headers = [str(c) if c is not None else "" for c in rows[0]]
+        headers = [_escape_pipe(str(c) if c is not None else "") for c in rows[0]]
         parts.append("| " + " | ".join(headers) + " |")
         parts.append("| " + " | ".join(["---"] * len(headers)) + " |")
         for row in rows[1:]:
-            cells = [str(c) if c is not None else "" for c in row]
-            # Pad or trim to match header count
+            cells = [_escape_pipe(str(c) if c is not None else "") for c in row]
             while len(cells) < len(headers):
                 cells.append("")
             parts.append("| " + " | ".join(cells[:len(headers)]) + " |")
@@ -57,16 +76,15 @@ def convert_pdf(filepath):
             text = page.extract_text()
             if text:
                 parts.append(text)
-            # Extract tables too
             tables = page.extract_tables()
             for table in tables:
                 if not table or not table[0]:
                     continue
-                headers = [str(c) if c else "" for c in table[0]]
+                headers = [_escape_pipe(str(c) if c else "") for c in table[0]]
                 md_table = ["| " + " | ".join(headers) + " |"]
                 md_table.append("| " + " | ".join(["---"] * len(headers)) + " |")
                 for row in table[1:]:
-                    cells = [str(c) if c else "" for c in row]
+                    cells = [_escape_pipe(str(c) if c else "") for c in row]
                     while len(cells) < len(headers):
                         cells.append("")
                     md_table.append("| " + " | ".join(cells[:len(headers)]) + " |")
@@ -267,19 +285,16 @@ def _epub_convert_direct(ebook_convert, filepath):
 def _epub_via_zip(filepath):
     """Convert EPUB by extracting HTML directly from the zip (DRM-free only)."""
     import zipfile
-    from markdownify import markdownify
 
     with zipfile.ZipFile(filepath, 'r') as zf:
-        # Check for DRM encryption — if found, don't even try to read content
         if 'META-INF/encryption.xml' in zf.namelist():
             try:
                 enc_xml = zf.read('META-INF/encryption.xml').decode('utf-8', errors='replace')
                 if 'EncryptedData' in enc_xml:
-                    return None  # DRM detected, signal to caller
+                    return None
             except Exception:
                 pass
 
-        # Find all HTML/XHTML files
         html_files = sorted([
             f for f in zf.namelist()
             if f.lower().endswith(('.html', '.xhtml', '.htm'))
@@ -291,12 +306,10 @@ def _epub_via_zip(filepath):
         for html_file in html_files:
             try:
                 raw = zf.read(html_file)
-                # Must decode as valid UTF-8 (not latin-1 fallback, which masks encrypted data)
                 html = raw.decode("utf-8")
-                # Must contain actual HTML structure
                 if '<!DOCTYPE' not in html[:500] and '<html' not in html[:500] and '<body' not in html[:1000]:
                     continue
-                md = markdownify(html, heading_style="ATX")
+                md = _to_gfm(html)
                 cleaned = md.strip()
                 if cleaned:
                     parts.append(cleaned)
@@ -337,8 +350,10 @@ def convert_url(url):
     downloaded = trafilatura.fetch_url(url)
     if not downloaded:
         raise ValueError(f"Could not fetch URL: {url}")
-    result = trafilatura.extract(downloaded, output_format="markdown", include_tables=True,
-                                  include_links=True, include_images=False)
+    result = trafilatura.extract(
+        downloaded, output_format="markdown", include_tables=True,
+        include_links=True, include_images=False, include_formatting=True,
+    )
     if not result:
         raise ValueError(f"Could not extract content from: {url}")
     return result
